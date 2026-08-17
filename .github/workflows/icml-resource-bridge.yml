@@ -1,0 +1,88 @@
+name: ICML 2026 resource data bridge
+
+on:
+  push:
+    branches:
+      - automation/reproduce-papers-2026
+    paths:
+      - ".github/workflows/icml-resource-bridge.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out bridge branch
+        uses: actions/checkout@v4
+
+      - name: Download frozen challenge inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bridge-data
+          curl --fail --location --retry 8 --retry-all-errors \
+            'https://huggingface.co/datasets/ICML-2026-agent-repro/verdicts/resolve/f0c5a8b/verdicts.json?download=true' \
+            --output bridge-data/verdicts-f0c5a8b.json
+
+          for name in index.json papers.json; do
+            if curl --fail --location --retry 5 --retry-all-errors \
+              "https://huggingface.co/datasets/ICML-2026-agent-repro/challenge/resolve/main/${name}?download=true" \
+              --output "bridge-data/${name}"; then
+              echo "Downloaded ${name}"
+            else
+              rm -f "bridge-data/${name}"
+            fi
+          done
+
+      - name: Validate frozen snapshot
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          path = Path("bridge-data/verdicts-f0c5a8b.json")
+          payload = json.loads(path.read_text())
+          assert isinstance(payload, (dict, list)), type(payload)
+
+          records = []
+          if isinstance(payload, dict):
+              for key, value in payload.items():
+                  if isinstance(value, dict):
+                      record = dict(value)
+                      record.setdefault("space_id", key)
+                      records.append(record)
+          else:
+              records = [x for x in payload if isinstance(x, dict)]
+
+          fully = {}
+          for record in records:
+              orid = str(record.get("orid") or "").strip()
+              claims = record.get("claims")
+              if not orid or not isinstance(claims, list) or not claims:
+                  continue
+              verdicts = [str(c.get("verdict") or "").strip().lower() for c in claims if isinstance(c, dict)]
+              if len(verdicts) == len(claims) and verdicts and all(v == "verified" for v in verdicts):
+                  fully.setdefault(orid, []).append(record)
+
+          report = {
+              "source_revision": "f0c5a8b",
+              "record_count": len(records),
+              "fully_reproduced_unique_papers": len(fully),
+              "fully_verified_logbooks": sum(map(len, fully.values())),
+              "input_size_bytes": path.stat().st_size,
+          }
+          Path("bridge-data/validation.json").write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, indent=2))
+          assert len(fully) == 266, report
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: icml-2026-frozen-source
+          path: bridge-data/
+          if-no-files-found: error
+          retention-days: 1
