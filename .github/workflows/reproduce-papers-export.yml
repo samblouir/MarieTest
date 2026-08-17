@@ -1,0 +1,80 @@
+name: Temporary ICML 2026 catalog export
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/reproduce-papers-export.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out temporary source branch
+        uses: actions/checkout@v4
+        with:
+          ref: automation/reproduce-papers-2026
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-reproduce-papers.txt
+
+      - name: Restore and verify generator
+        run: |
+          mkdir -p /tmp/reproduce-papers/scripts
+          cat .bootstrap/build_catalog.py.gz.b64.* | base64 --decode | gzip --decompress > /tmp/reproduce-papers/scripts/build_catalog.py
+          python -m py_compile /tmp/reproduce-papers/scripts/build_catalog.py
+          test "$(sha256sum /tmp/reproduce-papers/scripts/build_catalog.py | cut -d' ' -f1)" = "cc84fb76867e0dd2e59b4ecc0dffd0355db0bb1a16bd846f89a09e6f00c978a4"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-reproduce-papers.txt
+
+      - name: Build and validate catalog from frozen official data
+        env:
+          HF_HOME: ${{ runner.temp }}/huggingface-cache
+          HF_HUB_DISABLE_TELEMETRY: "1"
+        run: |
+          mkdir -p /tmp/reproduce-papers/catalog/scripts
+          python /tmp/reproduce-papers/scripts/build_catalog.py \
+            --output /tmp/reproduce-papers/catalog \
+            --max-neighborhood 45 \
+            --allow-nearest-snapshot \
+            --verbose
+          cp /tmp/reproduce-papers/scripts/build_catalog.py /tmp/reproduce-papers/catalog/scripts/build_catalog.py
+          cp requirements-reproduce-papers.txt /tmp/reproduce-papers/catalog/requirements.txt
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('/tmp/reproduce-papers/catalog')
+          validation = json.loads((root / 'data' / 'validation.json').read_text())
+          paper_dirs = [p for p in (root / 'papers').iterdir() if p.is_dir()]
+          assert validation['paper_count'] == 266, validation
+          assert len(paper_dirs) == 266, len(paper_dirs)
+          assert all((p / 'README.md').is_file() for p in paper_dirs)
+          assert all((p / 'verdicts.json').is_file() for p in paper_dirs)
+          print(json.dumps(validation, indent=2, sort_keys=True))
+          PY
+
+      - name: Package catalog
+        run: |
+          tar -C /tmp/reproduce-papers/catalog -czf /tmp/reproduce-papers/icml-2026-reproduction-catalog.tar.gz .
+          sha256sum /tmp/reproduce-papers/icml-2026-reproduction-catalog.tar.gz
+
+      - name: Upload catalog artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: icml-2026-reproduction-catalog
+          path: /tmp/reproduce-papers/icml-2026-reproduction-catalog.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
